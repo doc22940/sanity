@@ -77,13 +77,21 @@ function extractFromSanitySchema(sanitySchema) {
   const sanityTypes = sanitySchema._original.types
   const typeNames = sanitySchema.getTypeNames()
   const unionTypes = []
-  const types = typeNames
-    .map(name => sanitySchema.get(name))
-    .filter(isBaseType)
-    .map(type => convertType(type))
-    .concat(unionTypes)
+  const types = typeNames.map(name => sanitySchema.get(name)).filter(isBaseType)
 
-  return {types, interfaces: [getDocumentInterfaceDefinition()]}
+  let filteredTypes = []
+  types.forEach(type => {
+    const convertedType = convertType(type)
+    if (Array.isArray(convertedType)) {
+      convertedType.forEach(converted => filteredTypes.push(converted))
+    } else {
+      filteredTypes.push(convertedType)
+    }
+  })
+
+  filteredTypes = filteredTypes.concat(unionTypes)
+
+  return {types: filteredTypes, interfaces: [getDocumentInterfaceDefinition()]}
 
   function isTopLevelType(typeName) {
     return typeNames.includes(typeName)
@@ -149,6 +157,14 @@ function extractFromSanitySchema(sanitySchema) {
 
   function convertType(type, parent, props = {}) {
     const mapped = _convertType(type, parent, {isField: Boolean(props.fieldName)})
+    if (Array.isArray(mapped)) {
+      return mapped.map(mappedItem => {
+        const gqlName = props.fieldName || mappedItem.name
+        const originalName = type.name
+        const original = gqlName === originalName ? {} : {originalName: originalName}
+        return Object.assign({}, props, mappedItem, original)
+      })
+    }
     const gqlName = props.fieldName || mapped.name
     const originalName = type.name
     const original = gqlName === originalName ? {} : {originalName: originalName}
@@ -175,12 +191,42 @@ function extractFromSanitySchema(sanitySchema) {
 
     const name = `${parent || ''}${getTypeName(def.name)}`
     const fields = collectFields(def)
-    const firstUnprefixed = Math.max(0, fields.findIndex(field => field.name[0] !== '_'))
+    const firstUnprefixed = Math.max(
+      0,
+      fields.findIndex(field => field.name[0] !== '_')
+    )
     fields.splice(
       firstUnprefixed,
       0,
       ...[createStringField('_key'), !isDocument && createStringField('_type')].filter(Boolean)
     )
+
+    if (isDocument) {
+      return [
+        {
+          kind: 'Type',
+          name,
+          type: 'Object',
+          description: getDescription(def),
+          fields: fields.map(field =>
+            isArrayOfBlocks(field)
+              ? buildRawField(field, name)
+              : convertType(field, name, {fieldName: field.name})
+          )
+        },
+        {
+          kind: 'Type',
+          name: `${name}Reference`,
+          type: 'Object',
+          description: getDescription(def),
+          fields: fields.map(field =>
+            isArrayOfBlocks(field)
+              ? buildRawField(field, name)
+              : convertType(field, name, {fieldName: field.name})
+          )
+        }
+      ]
+    }
 
     return {
       kind: 'Type',
@@ -304,11 +350,18 @@ function extractFromSanitySchema(sanitySchema) {
         }
       })
 
-      const converted = candidates.map(def => convertType(def))
-
+      let filteredTypes = []
+      const converted = candidates.map(def => {
+        const convertedType = convertType(def)
+        if (Array.isArray(convertedType)) {
+          convertedType.forEach(convertedDef => filteredTypes.push(convertedDef))
+        } else {
+          filteredTypes.push(convertedType)
+        }
+      })
       // We might end up with union types being returned - these needs to be flattened
       // so that an ImageOr(PersonOrPet) becomes ImageOrPersonOrPet
-      const flattened = converted.reduce((acc, candidate) => {
+      const flattened = filteredTypes.reduce((acc, candidate) => {
         const union = unionTypes.find(item => item.name === candidate.type)
         return union
           ? acc.concat(union.types.map(type => ({type, isReference: candidate.isReference})))
@@ -320,11 +373,19 @@ function extractFromSanitySchema(sanitySchema) {
         return typeDef && typeDef.type === 'document'
       })
 
-      const interfaces = allCandidatesAreDocuments ? ['Document'] : undefined
-      const refs = flattened.filter(type => type.isReference).map(ref => ref.type)
-      const possibleTypes = flattened.map(type => (type.isReference ? type.type : type.name)).sort()
 
+      const interfaces = allCandidatesAreDocuments ? ['Document'] : undefined
+      const refs = flattened.filter(type => type.isReference).map(ref => `${ref.type}Reference`)
+      const possibleTypes = flattened.map(type => (type.isReference ? `${type.type}Reference` : type.name)).sort()
       const name = possibleTypes.join('Or')
+      if (possibleTypes.length === 4) {
+        console.log('converted', converted)
+        console.log('all', candidates[0])
+        console.log('flat', flattened)
+        console.log('poss', possibleTypes)
+        console.log('name', name)
+      }
+
 
       if (!unionTypes.some(item => item.name === name)) {
         unionTypes.push({
@@ -336,6 +397,9 @@ function extractFromSanitySchema(sanitySchema) {
       }
 
       const references = refs.length > 0 ? refs : undefined
+      if (possibleTypes.length === 4) {
+        console.log(references)
+      }
       return {type: name, references}
     } finally {
       const parentIndex = unionRecursionGuards.indexOf(parent)
@@ -347,6 +411,16 @@ function extractFromSanitySchema(sanitySchema) {
 
   function getDocumentDefinition(def) {
     const objectDef = getObjectDefinition(def)
+    if (Array.isArray(objectDef)) {
+      return objectDef.map(definition => {
+        const fields = getDocumentInterfaceFields().concat(definition.fields)
+
+        return Object.assign(definition, {
+          fields,
+          interfaces: ['Document']
+        })
+      })
+    }
     const fields = getDocumentInterfaceFields().concat(objectDef.fields)
 
     return Object.assign(objectDef, {

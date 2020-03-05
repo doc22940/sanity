@@ -78,6 +78,7 @@ module.exports = async function deployApiActions(args, context) {
     const extracted = extractFromSanitySchema(sanitySchema)
 
     schema = generateSchema(extracted)
+    require('fs').writeFileSync('./wut3.json', JSON.stringify(schema, null, 2))
   } catch (err) {
     spinner.fail()
 
